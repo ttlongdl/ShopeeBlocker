@@ -1,0 +1,89 @@
+name: Build and release ShopeeBlocker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Tweak.xm'
+      - 'Makefile'
+      - 'control'
+      - 'ShopeeBlocker.plist'
+      - '.github/workflows/build-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shopeeblocker-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          set -euo pipefail
+          brew install ldid make
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Build rootless DEB
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
+          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          ls -lah packages
+
+      - name: Validate output
+        id: package
+        run: |
+          set -euo pipefail
+          mapfile_workaround=0
+          files=(packages/*.deb)
+          test "${#files[@]}" -eq 1
+          deb="${files[0]}"
+          pkg="$(dpkg-deb -f "$deb" Package)"
+          arch="$(dpkg-deb -f "$deb" Architecture)"
+          version="$(dpkg-deb -f "$deb" Version)"
+          declared="$(sed -n 's/^Version:[[:space:]]*//p' control | head -n 1)"
+          test "$pkg" = "com.ttlongdl.shopeeblocker"
+          test "$arch" = "iphoneos-arm64"
+          test "$version" = "$declared"
+          test -n "$version"
+          test "$(basename "$deb")" = "com.ttlongdl.shopeeblocker_${version}_iphoneos-arm64.deb"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "deb=$deb" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShopeeBlocker-rootless
+          path: packages/*.deb
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Create release for new version only
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.package.outputs.version }}
+          DEB: ${{ steps.package.outputs.deb }}
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag exists; preserving published binary. Bump Version in control to publish again."
+            exit 0
+          fi
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then
+            echo "Tag $tag already exists but no release. Refusing to replace an existing tag."
+            exit 1
+          fi
+          gh release create "$tag" "$DEB" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "ShopeeBlocker $tag" \
+            --notes "Rootless ShopeeBlocker $tag. Always-on Shopee link blocking in Facebook."
