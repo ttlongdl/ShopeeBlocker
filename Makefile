@@ -1,5 +1,9 @@
 TARGET := iphone:clang:latest:17.0
+ifeq ($(THEOS_PACKAGE_SCHEME),roothide)
+ARCHS := arm64e
+else
 ARCHS := arm64
+endif
 INSTALL_TARGET_PROCESSES = Facebook
 THEOS_PACKAGE_SCHEME ?= rootless
 
