@@ -1,0 +1,9 @@
+Package: com.ttlongdl.shopeeblocker
+Name: ShopeeBlocker
+Version: 0.1.4
+Architecture: iphoneos-arm64
+Description: Blocks Shopee app deep links and Shopee short links from Facebook
+Maintainer: ttlongdl
+Author: ttlongdl
+Section: Tweaks
+Depends: mobilesubstrate (>= 0.9.5000)
