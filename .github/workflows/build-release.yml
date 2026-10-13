@@ -58,15 +58,31 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "deb=$deb" >> "$GITHUB_OUTPUT"
 
+      - name: Export injection dylib from validated DEB
+        env:
+          DEB: ${{ steps.package.outputs.deb }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/extracted
+          dpkg-deb -x "$DEB" dist/extracted
+          dylib="$(find dist/extracted -type f -name 'ShopeeBlocker.dylib' -print -quit)"
+          test -n "$dylib"
+          cp "$dylib" dist/ShopeeBlocker.dylib
+          test -s dist/ShopeeBlocker.dylib
+          file dist/ShopeeBlocker.dylib
+          shasum -a 256 dist/ShopeeBlocker.dylib
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ShopeeBlocker-rootless
-          path: packages/*.deb
+          path: |
+            packages/*.deb
+            dist/ShopeeBlocker.dylib
           retention-days: 14
           if-no-files-found: error
 
-      - name: Create release for new version only
+      - name: Publish versioned release assets
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -76,14 +92,19 @@ jobs:
           set -euo pipefail
           tag="v${VERSION}"
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $tag exists; preserving published binary. Bump Version in control to publish again."
+            echo "Release $tag already exists; only attach missing injection dylib."
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -Fxq 'ShopeeBlocker.dylib'; then
+              echo "Dylib already published; preserving release assets."
+            else
+              gh release upload "$tag" dist/ShopeeBlocker.dylib --repo "$GITHUB_REPOSITORY"
+            fi
             exit 0
           fi
           if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then
             echo "Tag $tag already exists but no release. Refusing to replace an existing tag."
             exit 1
           fi
-          gh release create "$tag" "$DEB" --repo "$GITHUB_REPOSITORY" \
+          gh release create "$tag" "$DEB" dist/ShopeeBlocker.dylib --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "ShopeeBlocker $tag" \
             --notes "Rootless ShopeeBlocker $tag. Always-on Shopee link blocking in Facebook."
