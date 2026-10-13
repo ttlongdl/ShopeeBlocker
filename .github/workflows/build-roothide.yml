@@ -12,7 +12,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: shopeeblocker-roothide-release
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -105,3 +109,24 @@ jobs:
           path: packages/*iphoneos-arm64e.deb
           retention-days: 14
           if-no-files-found: error
+
+      - name: Publish RootHide beta release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEB: ${{ steps.package.outputs.deb }}
+        run: |
+          set -euo pipefail
+          version="$(dpkg-deb -f "$DEB" Version)"
+          tag="v${version}-roothide"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "RootHide release $tag already exists; bump Version in control to publish another."
+            exit 0
+          fi
+          if git ls-remote --tags origin "refs/tags/$tag" | grep -q .; then
+            echo "Tag $tag exists without a release; refusing to overwrite it."
+            exit 1
+          fi
+          gh release create "$tag" "$DEB" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "ShopeeBlocker ${version} (RootHide beta)" \
+            --notes "RootHide community-testing beta. Package: com.ttlongdl.shopeeblocker-rh (iphoneos-arm64e). Not yet verified on a RootHide device. Please report Facebook crashes, failed link blocking, or unwanted in-app-browser popups in Issues."
