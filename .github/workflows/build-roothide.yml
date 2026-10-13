@@ -1,0 +1,107 @@
+name: Build ShopeeBlocker RootHide DEB
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Tweak.xm'
+      - 'Makefile'
+      - 'control'
+      - 'ShopeeBlocker.plist'
+      - '.github/workflows/build-roothide.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RootHide Theos
+        run: |
+          set -euo pipefail
+          brew install dpkg ldid make
+          git clone --depth 1 --recurse-submodules https://github.com/roothide/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          test -f "$HOME/theos/makefiles/common.mk"
+
+      - name: Build RootHide package
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/opt/make/libexec/gnubin:$PATH"
+          make clean THEOS_PACKAGE_SCHEME=roothide
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+          find packages -type f -name '*.deb' -print
+
+      - name: Repack with isolated RootHide identity
+        id: package
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          built=(packages/*iphoneos-arm64e.deb)
+          test "${#built[@]}" -eq 1
+          deb="${built[0]}"
+          test "$(dpkg-deb -f "$deb" Architecture)" = "iphoneos-arm64e"
+          test "$(dpkg-deb -f "$deb" Package)" = "com.ttlongdl.shopeeblocker"
+          version="$(sed -n 's/^Version:[[:space:]]*//p' control | head -n 1)"
+          test -n "$version"
+          work="$RUNNER_TEMP/shopeeblocker-roothide"
+          mkdir -p "$work"
+          dpkg-deb -R "$deb" "$work"
+          WORK="$work" VERSION="$version" python3 - <<'PY'
+          import os
+          from pathlib import Path
+          p = Path(os.environ["WORK"]) / "DEBIAN/control"
+          fields = {
+              "Package": "com.ttlongdl.shopeeblocker-rh",
+              "Name": "ShopeeBlocker (RootHide)",
+              "Version": os.environ["VERSION"],
+              "Architecture": "iphoneos-arm64e",
+              "Description": "RootHide build: blocks Shopee deep links and short links from Facebook",
+          }
+          lines = p.read_text().splitlines()
+          seen = set()
+          output = []
+          for line in lines:
+              key = line.split(":", 1)[0] if ":" in line else ""
+              if key in fields:
+                  output.append(f"{key}: {fields[key]}")
+                  seen.add(key)
+              else:
+                  output.append(line)
+          for key, value in fields.items():
+              if key not in seen:
+                  output.append(f"{key}: {value}")
+          p.write_text("\n".join(output) + "\n")
+          PY
+          rm -f packages/*iphoneos-arm64e.deb
+          output="packages/com.ttlongdl.shopeeblocker-rh_${version}_iphoneos-arm64e.deb"
+          dpkg-deb --root-owner-group --build "$work" "$output"
+          echo "deb=$output" >> "$GITHUB_OUTPUT"
+
+      - name: Verify RootHide DEB
+        env:
+          DEB: ${{ steps.package.outputs.deb }}
+        run: |
+          set -euo pipefail
+          test "$(dpkg-deb -f "$DEB" Package)" = "com.ttlongdl.shopeeblocker-rh"
+          test "$(dpkg-deb -f "$DEB" Architecture)" = "iphoneos-arm64e"
+          dpkg-deb -c "$DEB" > "$RUNNER_TEMP/contents.txt"
+          grep -F 'ShopeeBlocker.dylib' "$RUNNER_TEMP/contents.txt"
+          grep -F 'ShopeeBlocker.plist' "$RUNNER_TEMP/contents.txt"
+          if grep -E 'PreferenceBundles|ShopeeBlockerPrefs' "$RUNNER_TEMP/contents.txt"; then
+            echo "Unexpected preferences in package" >&2
+            exit 1
+          fi
+          dpkg-deb -f "$DEB" Package Version Architecture Depends
+
+      - name: Upload RootHide DEB for device testing
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShopeeBlocker-RootHide
+          path: packages/*iphoneos-arm64e.deb
+          retention-days: 14
+          if-no-files-found: error
